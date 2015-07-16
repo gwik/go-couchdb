@@ -5,12 +5,17 @@
 package couchdb
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"io/ioutil"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 )
 
 // Client represents a remote CouchDB server.
@@ -224,6 +229,38 @@ func (db *DB) View(ddoc, view string, result interface{}, opts Options) error {
 	return readBody(resp, &result)
 }
 
+// ViewScanner invokes a view.
+// http://docs.couchdb.org/en/latest/api/ddoc/views.html
+func (db *DB) ViewScanner(ddoc, view string, opts Options) (*RowScanner, error) {
+	oopts := opts
+
+	if !strings.HasPrefix(ddoc, "_design/") {
+		return nil, errors.New("couchdb.View: design doc name must start with _design/")
+	}
+
+	for k, v := range oopts {
+		if _, ok := opts[k]; !ok {
+			opts[k] = v
+		}
+	}
+
+	path, err := optpath(opts, viewJsonKeys, db.name, ddoc, "_view", view)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := db.request("GET", path, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("Unexpected status code: %d", resp.StatusCode)
+	}
+
+	return newRowScanner(resp), nil
+}
+
 // AllDocs invokes the _all_docs view of a database.
 //
 // The output of the query is unmarshalled into the given result.
@@ -242,4 +279,163 @@ func (db *DB) AllDocs(result interface{}, opts Options) error {
 		return err
 	}
 	return readBody(resp, &result)
+}
+
+func (db *DB) AllDocsScanner(opts Options) (*RowScanner, error) {
+	path, err := optpath(opts, viewJsonKeys, db.name, "_all_docs")
+	if err != nil {
+		return nil, err
+	}
+	resp, err := db.request("GET", path, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("Unexpected status code: %d", resp.StatusCode)
+	}
+
+	return newRowScanner(resp), nil
+}
+
+type Row struct {
+	ID     string           `json:"id"`
+	Key    string           `json:"key"`
+	Value_ *json.RawMessage `json:"value"`
+	Doc_   *json.RawMessage `json:"doc"`
+}
+
+func (r Row) HasValue() bool {
+	return r.Value_ != nil
+}
+
+func (r Row) HasDoc() bool {
+	return r.Doc_ != nil
+}
+
+func (r Row) Value(v interface{}) error {
+	if r.Value_ != nil {
+		return json.Unmarshal(*r.Value_, v)
+	}
+	return errors.New("value is nil.")
+}
+
+func (r Row) Doc(v interface{}) error {
+	if r.Doc_ != nil {
+		return json.Unmarshal(*r.Doc_, v)
+	}
+	return errors.New("doc is nil.")
+}
+
+type RowScanner struct {
+	resp *http.Response
+
+	row Row
+
+	quit chan struct{}
+	done chan struct{}
+	rows chan Row
+
+	mu  *sync.Mutex
+	err error
+}
+
+var (
+	delim     byte = '\n'            // row delimiter
+	endMarker      = []byte("}\r\n") // absence of comma means last record.
+)
+
+func newRowScanner(resp *http.Response) *RowScanner {
+	s := &RowScanner{
+		resp: resp,
+		quit: make(chan struct{}),
+		rows: make(chan Row),
+		mu:   new(sync.Mutex),
+	}
+
+	go s.readLoop()
+	return s
+}
+
+func (s *RowScanner) Close() error {
+	close(s.quit)
+	return s.err
+}
+
+func (s *RowScanner) readLoop() {
+	defer close(s.rows)
+	defer func() {
+		io.Copy(ioutil.Discard, s.resp.Body)
+		s.resp.Body.Close()
+	}()
+
+	b := bufio.NewReader(s.resp.Body)
+	_, err := b.ReadBytes(delim) // read first line: {"total_rows":5495,"offset":0,"rows":[
+	if err != nil {
+		s.setErr(err)
+		return
+	}
+
+	for {
+		select {
+		case <-s.quit:
+			return
+		default:
+		}
+
+		line, err := b.ReadBytes(delim)
+		if err != nil {
+			s.setErr(err)
+			return
+		}
+
+		last := false
+		if bytes.HasSuffix(line, endMarker) {
+			last = true
+		}
+
+		line = bytes.TrimRight(line, ",\r\n")
+
+		var row Row
+		if err := json.Unmarshal(line, &row); err != nil {
+			s.setErr(err)
+			return
+		}
+
+		select {
+		case s.rows <- row:
+			if last {
+				return
+			}
+		case <-s.quit:
+			return
+		}
+
+	}
+}
+
+func (s *RowScanner) Scan() bool {
+	var ok bool
+	select {
+	case s.row, ok = <-s.rows:
+	case <-s.quit:
+		return false
+	}
+	return ok
+}
+
+func (s *RowScanner) Row() Row {
+	return s.row
+}
+
+func (s *RowScanner) setErr(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.err = err
+}
+
+func (s *RowScanner) Err() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.err
 }

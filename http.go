@@ -193,6 +193,7 @@ func responseRev(resp *http.Response, err error) (string, error) {
 
 func readBody(resp *http.Response, v interface{}) error {
 	if err := json.NewDecoder(resp.Body).Decode(&v); err != nil {
+		io.Copy(ioutil.Discard, resp.Body)
 		resp.Body.Close()
 		return err
 	}

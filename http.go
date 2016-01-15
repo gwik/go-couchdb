@@ -9,7 +9,6 @@ import (
 	"io/ioutil"
 	"net/http"
 	"net/url"
-	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -158,23 +157,38 @@ func encval(w io.Writer, k string, v interface{}) error {
 	if v == nil {
 		return errors.New("value is nil")
 	}
-	rv := reflect.ValueOf(v)
 	var str string
-	switch rv.Kind() {
-	case reflect.String:
-		str = url.QueryEscape(rv.String())
-	case reflect.Bool:
-		str = strconv.FormatBool(rv.Bool())
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		str = strconv.FormatInt(rv.Int(), 10)
-	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		str = strconv.FormatUint(rv.Uint(), 10)
-	case reflect.Float32:
-		str = strconv.FormatFloat(rv.Float(), 'f', -1, 32)
-	case reflect.Float64:
-		str = strconv.FormatFloat(rv.Float(), 'f', -1, 64)
+	switch v.(type) {
+	case string:
+		str = url.QueryEscape(v.(string))
+	case bool:
+		str = strconv.FormatBool(v.(bool))
+	case int:
+		str = strconv.FormatInt(int64(v.(int)), 10)
+	case int8:
+		str = strconv.FormatInt(int64(v.(int8)), 10)
+	case int16:
+		str = strconv.FormatInt(int64(v.(int16)), 10)
+	case int32:
+		str = strconv.FormatInt(int64(v.(int32)), 10)
+	case int64:
+		str = strconv.FormatInt(v.(int64), 10)
+	case uint:
+		str = strconv.FormatUint(uint64(v.(uint)), 10)
+	case uint8:
+		str = strconv.FormatUint(uint64(v.(uint8)), 10)
+	case uint16:
+		str = strconv.FormatUint(uint64(v.(uint16)), 10)
+	case uint32:
+		str = strconv.FormatUint(uint64(v.(uint32)), 10)
+	case uint64:
+		str = strconv.FormatUint(v.(uint64), 10)
+	case float32:
+		str = strconv.FormatFloat(float64(v.(float32)), 'f', -1, 32)
+	case float64:
+		str = strconv.FormatFloat(v.(float64), 'f', -1, 64)
 	default:
-		return fmt.Errorf("unsupported type: %s", rv.Type())
+		return fmt.Errorf("unsupported type: %T", v)
 	}
 	_, err := io.WriteString(w, str)
 	return err

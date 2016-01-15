@@ -370,11 +370,16 @@ func (s *RowScanner) readLoop() {
 	}()
 
 	b := bufio.NewReader(s.resp.Body)
-	_, err := b.ReadBytes(delim) // read first line: {"total_rows":5495,"offset":0,"rows":[
+	line, err := b.ReadBytes(delim) // read first line: {"total_rows":5495,"offset":0,"rows":[
 	if err != nil {
 		s.setErr(err)
 		return
 	}
+
+	// if !bytes.HasSuffix(line, []byte("\"rows\":[\r\n")) {
+	// 	s.setErr(fmt.Errorf("Unexpected header line: %q", line))
+	// 	return
+	// }
 
 	for {
 		select {
@@ -383,9 +388,13 @@ func (s *RowScanner) readLoop() {
 		default:
 		}
 
-		line, err := b.ReadBytes(delim)
+		line, err = b.ReadBytes(delim)
 		if err != nil {
 			s.setErr(err)
+			return
+		}
+
+		if bytes.Equal(line, []byte("}]\r\n")) || bytes.Equal(line, []byte("\r\n")) {
 			return
 		}
 
